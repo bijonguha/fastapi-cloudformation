@@ -89,13 +89,17 @@ Resources:
             - Name: API_KEY
               Value: bijonguha  # Hardcode for simplicity
 
-  # Application Load Balancer
+  # Application Load Balancer (with your actual subnets)
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Name: !Sub 'fastapi-${AWS::StackName}'
       Scheme: internet-facing
       Type: application
+      Subnets:
+        - subnet-052b286d  # ap-south-1a
+        - subnet-263f4f6a  # ap-south-1b  
+        - subnet-ca2299b1  # ap-south-1c
       SecurityGroups:
         - !Ref LoadBalancerSecurityGroup
 
@@ -141,6 +145,10 @@ Resources:
         AwsvpcConfiguration:
           SecurityGroups:
             - !Ref ECSSecurityGroup
+          Subnets:
+            - subnet-052b286d  # ap-south-1a
+            - subnet-263f4f6a  # ap-south-1b  
+            - subnet-ca2299b1  # ap-south-1c
           AssignPublicIp: ENABLED
       LoadBalancers:
         - ContainerName: fastapi-container
