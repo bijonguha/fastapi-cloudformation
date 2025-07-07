@@ -46,7 +46,7 @@ Resources:
     Type: AWS::SSM::Parameter
     Properties:
       Name: API_KEY
-      Type: SecureString
+      Type: String
       Value: bijonguha
       Description: 'API key for FastAPI authentication'
 
