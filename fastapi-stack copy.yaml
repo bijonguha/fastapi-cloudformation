@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Beginner-friendly, cost-optimized FastAPI service on ECS Fargate'
+
+Parameters:
+  ImageUri:
+    Type: String
+    Description: 'ECR image URI for the FastAPI application'
+    Default: '016091700700.dkr.ecr.ap-south-1.amazonaws.com/fastapi-app:latest'
+
+Resources:
+  # Use Default VPC instead of creating new one (COST SAVING)
+  # This uses the VPC that AWS provides for free in every account
+  
+  # Security Group for Load Balancer
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Allow HTTP traffic from internet'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: 'Allow HTTP from anywhere'
+      Tags:
+        - Key: Name
+          Value: FastAPI-ALB-SG
+
+  # Security Group for ECS Tasks
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Allow traffic from load balancer to FastAPI app'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+          Description: 'Allow traffic from load balancer'
+      Tags:
+        - Key: Name
+          Value: FastAPI-ECS-SG
+
+  # API Key in Parameter Store (encrypted storage)
+  APIKeyParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: API_KEY
+      Type: SecureString
+      Value: bijonguha
+      Description: 'API key for FastAPI authentication'
+
+  # CloudWatch Log Group (shorter retention for cost savings)
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/fastapi-app
+      RetentionInDays: 3
+      Tags:
+        - Key: Name
+          Value: FastAPI-Logs
+
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: fastapi-cluster
+      Tags:
+        - Key: Name
+          Value: FastAPI-Cluster
+
+  # Task Execution Role (for ECS to pull image and write logs)
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+      Tags:
+        - Key: Name
+          Value: FastAPI-Execution-Role
+
+  # Task Role (for app to access Parameter Store)
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: SSMParameterAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ssm:GetParameter'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/API_KEY'
+      Tags:
+        - Key: Name
+          Value: FastAPI-Task-Role
+
+  # Task Definition (COST OPTIMIZED - minimal resources)
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: fastapi-app
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256              # Smallest CPU (0.25 vCPU) - COST SAVING
+      Memory: 512            # Smallest memory (512 MB) - COST SAVING
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole
+      TaskRoleArn: !Ref ECSTaskRole
+      ContainerDefinitions:
+        - Name: fastapi-container
+          Image: !Ref ImageUri
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: ENVIRONMENT
+              Value: CLOUD-DEV
+          # Simplified health check
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'curl -f http://localhost:8080/healthcheck || exit 1'
+            Interval: 60      # Check every 60 seconds (less frequent)
+            Timeout: 10
+            Retries: 2        # Fewer retries
+            StartPeriod: 120  # Longer startup time
+      Tags:
+        - Key: Name
+          Value: FastAPI-Task-Definition
+
+  # Application Load Balancer (uses default subnets - COST SAVING)
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: fastapi-alb
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Tags:
+        - Key: Name
+          Value: FastAPI-ALB
+
+  # Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: fastapi-tg
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref 'AWS::NoValue'  # Uses default VPC
+      HealthCheckPath: /healthcheck
+      HealthCheckIntervalSeconds: 60    # Less frequent health checks
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3        # Fewer attempts before marking unhealthy
+      Matcher:
+        HttpCode: 200
+      Tags:
+        - Key: Name
+          Value: FastAPI-Target-Group
+
+  # Load Balancer Listener
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # ECS Service (COST OPTIMIZED - single instance)
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: LoadBalancerListener
+    Properties:
+      ServiceName: fastapi-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ECSTaskDefinition
+      DesiredCount: 1                    # COST SAVING: Only 1 container instead of 2
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+          AssignPublicIp: ENABLED        # Uses default subnets
+      LoadBalancers:
+        - ContainerName: fastapi-container
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroup
+      HealthCheckGracePeriodSeconds: 120
+      Tags:
+        - Key: Name
+          Value: FastAPI-Service
+
+Outputs:
+  LoadBalancerURL:
+    Description: 'URL to access your FastAPI application'
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-URL'
+
+  HealthCheckURL:
+    Description: 'Health check endpoint'
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}/healthcheck'
+
+  APIEndpointURL:
+    Description: 'Hello API endpoint (use with X-API-Key: bijonguha header)'
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}/hello'
+
+  TestCommand:
+    Description: 'Command to test your API'
+    Value: !Sub |
+      curl -X POST 'http://${ApplicationLoadBalancer.DNSName}/hello' \
+        -H 'Content-Type: application/json' \
+        -H 'X-API-Key: bijonguha' \
+        -d '{"name": "Beginner"}'
+
+  CostInfo:
+    Description: 'Estimated monthly cost'
+    Value: 'Approximately $8-12 USD per month'

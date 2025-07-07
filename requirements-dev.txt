@@ -1,0 +1,15 @@
+# Include production requirements
+-r requirements.txt
+
+# Testing
+pytest
+pytest-asyncio
+httpx
+
+# Code quality
+flake8
+bandit
+black
+
+# Development
+pre-commit
